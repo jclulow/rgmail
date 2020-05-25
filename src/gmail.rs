@@ -43,6 +43,7 @@ pub struct Label {
 
 pub trait LabelsHelper {
     fn names(&self) -> Vec<&str>;
+    fn id_of(&self, n: &str) -> Option<&str>;
 }
 
 impl LabelsHelper for Vec<Label> {
@@ -52,6 +53,16 @@ impl LabelsHelper for Vec<Label> {
         }).collect();
         names.sort();
         names
+    }
+
+    fn id_of(&self, n: &str) -> Option<&str> {
+        for l in self.iter() {
+            if l.name == n {
+                return Some(l.id.as_str());
+            }
+        }
+
+        None
     }
 }
 
