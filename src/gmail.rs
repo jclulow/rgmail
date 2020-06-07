@@ -439,7 +439,9 @@ impl<'a> GMail<'a> {
                     }
                 }
 
-                if ct.is_none() || cl.is_none() {
+                if ct.is_none() {
+                    debug!(self.log, "response: {:#?}",
+                        String::from_utf8_lossy(&report));
                     return Err("headers missing from response part response"
                         .into());
                 }
@@ -521,11 +523,12 @@ impl<'a> GMail<'a> {
                     }
                 };
 
-                let cl = cl.unwrap();
-                if cl != p.body.len() - c {
-                    return Err(format!("response part body len {} not what \
-                        we expected (i.e., {})", p.body.len() - c, cl)
-                        .into());
+                if let Some(cl) = cl {
+                    if cl != p.body.len() - c {
+                        return Err(format!("response part body len {} not \
+                            what we expected (i.e., {})", p.body.len() - c, cl)
+                            .into());
+                    }
                 }
 
                 out.push(MultiResult::Present(
