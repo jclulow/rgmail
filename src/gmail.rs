@@ -11,7 +11,7 @@ use reqwest::StatusCode;
 use reqwest::header;
 use serde_aux::prelude::*;
 
-use slog::{debug, Logger};
+use slog::{trace, debug, Logger};
 
 use super::Result;
 use super::gauth::GAuth;
@@ -336,6 +336,8 @@ impl<'a> GMail<'a> {
         body.push_str(bound);
         body.push_str("--\r\n");
 
+        trace!(self.log, "batch request: {:#?}", body);
+
         let buf = body.as_bytes().to_vec();
 
         let res = self.client.post(&url)
@@ -357,14 +359,36 @@ impl<'a> GMail<'a> {
         } else {
             return Err("content type missing from response".into());
         };
+        trace!(self.log, "boundary: {:#?}", rbnd);
 
         let x = res.bytes()?;
 
-        let mp = multipart_parse(&x, rbnd.as_bytes())?;
+        let mp = match multipart_parse(&x, rbnd.as_bytes()) {
+            Ok(mp) => mp,
+            Err(e) => {
+                let report = if x.len() < 200 {
+                    &x
+                } else {
+                    &x[..200]
+                };
+                debug!(self.log, "response: {:#?}",
+                    String::from_utf8_lossy(report));
+                return Err(format!("response multipart error: \
+                    (boundary {:?}) {}", rbnd, e).into());
+            }
+        };
 
         let mut out: Vec<MultiResult<T>> = Vec::new();
 
         for p in &mp.parts {
+            let report = if p.body.len() < 200 {
+                &p.body
+            } else {
+                &p.body[..200]
+            };
+            trace!(self.log, "process part: {:#?} {:#?}", p.headers,
+                String::from_utf8_lossy(&report));
+
             if let Some(ct) = p.headers.get("content-type") {
                 let ct: mime::Mime = ct.parse()?;
                 match (ct.type_(), ct.subtype().as_str()) {
@@ -405,6 +429,7 @@ impl<'a> GMail<'a> {
                 let mut ct: Option<String> = None;
                 let mut cl: Option<usize> = None;
                 for h in &headers {
+                    trace!(self.log, "part header: {:?}", h);
                     if h.name.to_ascii_lowercase() == "content-type" {
                         ct = Some(String::from_utf8(h.value.to_vec())?);
                     }
