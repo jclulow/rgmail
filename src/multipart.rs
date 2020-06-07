@@ -43,6 +43,14 @@ pub fn multipart_parse(data: &[u8], boundary: &[u8]) -> Result<Multipart>
         start
     };
 
+    let crlfstart = {
+        let mut crlfstart = CRLF.to_vec();
+        for b in &start {
+            crlfstart.push(*b);
+        }
+        crlfstart
+    };
+
     let inter = {
         let mut inter = CRLF.to_vec();
         for b in &bound {
@@ -77,13 +85,15 @@ pub fn multipart_parse(data: &[u8], boundary: &[u8]) -> Result<Multipart>
 
         match s {
             State::Rest => {
-                if follows(&start) {
-                    s = State::Part;
-                    *pos.borrow_mut() += start.len();
-                    acc.borrow_mut().clear();
+                *pos.borrow_mut() += if follows(&start) {
+                    start.len()
+                } else if follows(&crlfstart) {
+                    crlfstart.len()
                 } else {
                     return f("did not start with starting boundary");
-                }
+                };
+                s = State::Part;
+                acc.borrow_mut().clear();
             }
             State::Part => {
                 if follows(&inter) {
