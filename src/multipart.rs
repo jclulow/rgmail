@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use super::Result;
+use anyhow::{Result, bail};
 
 #[derive(Debug, Default)]
 pub struct Part {
@@ -64,8 +64,8 @@ pub fn multipart_parse(data: &[u8], boundary: &[u8]) -> Result<Multipart>
     let acc: std::cell::RefCell<Vec<u8>> = std::cell::RefCell::new(Vec::new());
 
     let f = |m: &str| -> Result<Multipart> {
-        Err(format!("(pos {}/{} acc len {}) {}", pos.borrow(),
-            data.len(), acc.borrow().len(), m).into())
+        bail!("(pos {}/{} acc len {}) {}", pos.borrow(), data.len(),
+            acc.borrow().len(), m);
     };
 
     let follows = |sample: &[u8]| -> bool {
@@ -147,7 +147,7 @@ pub fn multipart_parse(data: &[u8], boundary: &[u8]) -> Result<Multipart>
         let mut pos: usize = 0;
 
         let f = |m: &str| -> Result<Multipart> {
-            Err(m.into())
+            bail!("{}", m);
         };
 
         let cr = b'\r';

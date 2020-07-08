@@ -13,7 +13,8 @@ use serde_aux::prelude::*;
 
 use slog::{trace, debug, Logger};
 
-use super::Result;
+use anyhow::{Result, bail};
+
 use super::gauth::GAuth;
 use super::multipart::multipart_parse;
 
@@ -286,8 +287,7 @@ impl<'a> GMail<'a> {
 
         match serde_json::from_str(&t) {
             Ok(r) => Ok(r),
-            Err(e) => Err(format!("parsing response: {}: {}",
-                e, t).into()),
+            Err(e) => bail!("parsing response: {}: {}", e, t),
         }
     }
 
@@ -354,10 +354,10 @@ impl<'a> GMail<'a> {
             if let Some(b) = ct.get_param("boundary") {
                 b.to_string()
             } else {
-                return Err("content type missing boundary".into());
+                bail!("content type missing boundary");
             }
         } else {
-            return Err("content type missing from response".into());
+            bail!("content type missing from response");
         };
         trace!(self.log, "boundary: {:#?}", rbnd);
 
@@ -373,8 +373,7 @@ impl<'a> GMail<'a> {
                 };
                 debug!(self.log, "response: {:#?}",
                     String::from_utf8_lossy(report));
-                return Err(format!("response multipart error: \
-                    (boundary {:?}) {}", rbnd, e).into());
+                bail!("response multipart error: (boundary {:?}) {}", rbnd, e);
             }
         };
 
@@ -393,13 +392,10 @@ impl<'a> GMail<'a> {
                 let ct: mime::Mime = ct.parse()?;
                 match (ct.type_(), ct.subtype().as_str()) {
                     (mime::APPLICATION, "http") => (),
-                    ct => {
-                        return Err(format!("response part had wrong \
-                            type: {:?}", ct).into());
-                    }
+                    ct => bail!("response part had wrong type: {:?}", ct),
                 };
             } else {
-                return Err("content type missing from response part".into());
+                bail!("content type missing from response part");
             }
 
             let id: &str = if let Some(cid) = p.headers.get("content-id") {
@@ -408,14 +404,13 @@ impl<'a> GMail<'a> {
                     if n < ids.len() {
                         ids[n].as_ref()
                     } else {
-                        return Err("content id invalid in response \
-                            part".into());
+                        bail!("content id invalid in response part");
                     }
                 } else {
-                    return Err("content id invalid in response part".into());
+                    bail!("content id invalid in response part");
                 }
             } else {
-                return Err("content type missing from response part".into());
+                bail!("content type missing from response part");
             };
 
             let mut headers = [httparse::EMPTY_HEADER; 32];
@@ -442,8 +437,7 @@ impl<'a> GMail<'a> {
                 if ct.is_none() {
                     debug!(self.log, "response: {:#?}",
                         String::from_utf8_lossy(&report));
-                    return Err("headers missing from response part response"
-                        .into());
+                    bail!("headers missing from response part response");
                 }
 
                 #[allow(dead_code)]
@@ -499,38 +493,34 @@ impl<'a> GMail<'a> {
                                     continue;
                                 }
 
-                                return Err(format!("{} error for {}: {:?}",
-                                    status, id, e.error).into());
+                                bail!("{} error for {}: {:?}",
+                                    status, id, e.error);
                             }
                             Err(e) => {
                                 let b = String::from_utf8_lossy(&p.body[c..]);
                                 debug!(self.log, "response: {}", b);
-                                return Err(format!("could not parse 403:
-                                    {}", e).into());
+                                bail!("could not parse 403: {}", e);
                             }
                         }
                     }
 
                     let b = String::from_utf8_lossy(&p.body[c..]);
                     debug!(self.log, "response: {}", b);
-                    return Err(format!("inner response part had wrong \
-                        status: {} for {}", status, id).into());
+                    bail!("inner response part had wrong status: {} for {}",
+                        status, id);
                 }
 
                 let ct: mime::Mime = ct.unwrap().parse()?;
                 match (ct.type_(), ct.subtype()) {
                     (mime::APPLICATION, mime::JSON) => (),
-                    ct => {
-                        return Err(format!("response part response had wrong \
-                            type: {:?}", ct).into());
-                    }
+                    ct => bail!("response part response had wrong type: {:?}",
+                        ct),
                 };
 
                 if let Some(cl) = cl {
                     if cl != p.body.len() - c {
-                        return Err(format!("response part body len {} not \
-                            what we expected (i.e., {})", p.body.len() - c, cl)
-                            .into());
+                        bail!("response part body len {} not what we \
+                            expected (i.e., {})", p.body.len() - c, cl);
                     }
                 }
 
@@ -538,12 +528,12 @@ impl<'a> GMail<'a> {
                     serde_json::from_slice(&p.body[c..])?));
 
             } else {
-                return Err("response part response incomplete".into());
+                bail!("response part response incomplete");
             }
         }
 
         if out.len() != ids.len() {
-            return Err("did not get enough messages".into());
+            bail!("did not get enough messages");
         }
 
         /*
@@ -568,7 +558,7 @@ impl<'a> GMail<'a> {
                 }
             }
             if !found {
-                return Err("message missing from response".into());
+                bail!("message missing from response");
             }
         }
 
@@ -641,20 +631,14 @@ impl<'a> GMail<'a> {
             .send()?;
 
         if res.status() != StatusCode::OK {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,
-                format!("oddball response: {:#?}", res)).into());
+            bail!("oddball response: {:#?}", res);
         }
 
         let o: serde_json::Value = res.json()?;
 
         match o.get("labels") {
-            None => {
-                Err(std::io::Error::new(std::io::ErrorKind::InvalidData,
-                    "missing \"labels\" in response").into())
-            }
-            Some(l) => {
-                Ok(serde_json::from_value(l.to_owned())?)
-            }
+            None => bail!("missing \"labels\" in response"),
+            Some(l) => Ok(serde_json::from_value(l.to_owned())?),
         }
     }
 }

@@ -13,7 +13,7 @@ use serde::Deserialize;
 
 use slog::{debug, Logger};
 
-use super::Result;
+use anyhow::{Result, bail, anyhow};
 
 #[allow(dead_code)]
 #[derive(Deserialize)]
@@ -118,13 +118,13 @@ impl GAuth {
             .send()?;
 
         if res.status() != StatusCode::FOUND {
-            return Err(format!("oddball response: {:#?}", res).into());
+            bail!("oddball response: {:#?}", res);
         }
 
         if let Some(l) = res.headers().get(header::LOCATION) {
             Ok(String::from(l.to_str().unwrap()))
         } else {
-            Err(format!("oddball response (no location): {:#?}", res).into())
+            bail!("oddball response (no location): {:#?}", res);
         }
     }
 
@@ -141,7 +141,7 @@ impl GAuth {
             .send()?;
 
         if res.status() != StatusCode::OK {
-            return Err(format!("oddball response: {:#?}", res).into());
+            bail!("oddball response: {:#?}", res);
         }
         debug!(self.ga_log, "exchange response: {:#?}", &res);
 
@@ -149,7 +149,7 @@ impl GAuth {
 
         let et = SystemTime::UNIX_EPOCH
             .checked_add(Duration::from_millis(o.expiry_date - 600_000))
-            .ok_or("invalid expiry time")?;
+            .ok_or_else(|| anyhow!("invalid expiry time"))?;
 
         let mut i = self.ga_inner.borrow_mut();
 
@@ -174,14 +174,14 @@ impl GAuth {
             .send()?;
 
         if res.status() != reqwest::StatusCode::OK {
-            return Err(format!("oddball response: {:#?}", res).into());
+            bail!("oddball response: {:#?}", res);
         }
 
         let o: RRefresh = res.json()?;
 
         let et = SystemTime::now()
             .checked_add(Duration::from_secs(o.expires_in * 2 / 3))
-            .ok_or("invalid expiry time")?;
+            .ok_or_else(|| anyhow!("invalid expiry time"))?;
 
         i.access_token = o.access_token;
         i.expiry = Some(et);
@@ -208,6 +208,6 @@ impl GAuth {
 fn reqvalurl<S: AsRef<str>>(val: S, n: &str) -> Result<reqwest::Url> {
     reqwest::Url::parse(val.as_ref())
         .map_err(|e| {
-            format!("client_id.json URL \"{}\" invalid: {}", n, e).into()
+            anyhow!("client_id.json URL \"{}\" invalid: {}", n, e)
         })
 }
