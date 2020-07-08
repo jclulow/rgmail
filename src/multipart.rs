@@ -147,11 +147,11 @@ pub fn multipart_parse(data: &[u8], boundary: &[u8]) -> Result<Multipart>
         let mut pos: usize = 0;
 
         let f = |m: &str| -> Result<Multipart> {
-            Err(format!("{}", m).into())
+            Err(m.into())
         };
 
-        let cr = '\r' as u8;
-        let lf = '\n' as u8;
+        let cr = b'\r';
+        let lf = b'\n';
 
         let body: Vec<u8> = loop {
             if pos >= part.len() {
@@ -218,17 +218,17 @@ pub fn multipart_parse(data: &[u8], boundary: &[u8]) -> Result<Multipart>
             }
         };
 
-        let mut hm: HashMap<String, String> = HashMap::new();
+        let mut headers: HashMap<String, String> = HashMap::new();
 
         for hdr in &hdrs {
-            let t: Vec<&str> = hdr.splitn(2, ":").collect();
-            hm.insert(t[0].to_ascii_lowercase(),
+            let t: Vec<&str> = hdr.splitn(2, ':').collect();
+            headers.insert(t[0].to_ascii_lowercase(),
                 t[1].trim().to_string());
         }
 
         mp.parts.push(Part {
-            headers: hm,
-            body: body,
+            headers,
+            body,
         });
     }
 

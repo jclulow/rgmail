@@ -124,8 +124,7 @@ impl GAuth {
         if let Some(l) = res.headers().get(header::LOCATION) {
             Ok(String::from(l.to_str().unwrap()))
         } else {
-            return Err(format!("oddball response (no location): {:#?}",
-                res).into());
+            Err(format!("oddball response (no location): {:#?}", res).into())
         }
     }
 
@@ -148,7 +147,7 @@ impl GAuth {
 
         let o: RExchange = res.json()?;
 
-        let et = SystemTime::from(SystemTime::UNIX_EPOCH)
+        let et = SystemTime::UNIX_EPOCH
             .checked_add(Duration::from_millis(o.expiry_date - 600_000))
             .ok_or("invalid expiry time")?;
 

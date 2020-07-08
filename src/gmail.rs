@@ -128,7 +128,7 @@ pub enum MultiResult<T> {
 
 impl MessageMinimal {
     pub fn date(&self) -> SystemTime {
-        SystemTime::from(SystemTime::UNIX_EPOCH)
+        SystemTime::UNIX_EPOCH
             .checked_add(Duration::from_millis(self.internal_date))
             .expect("system time add")
     }
@@ -199,14 +199,14 @@ impl Message {
 
     pub fn date(&self) -> SystemTime {
         let ems: u64 = self.internal_date.parse().expect("system time");
-        SystemTime::from(SystemTime::UNIX_EPOCH)
+        SystemTime::UNIX_EPOCH
             .checked_add(Duration::from_millis(ems))
             .expect("system time add")
     }
 
     pub fn age_days(&self) -> f64 {
         let ems: u64 = self.internal_date.parse().expect("system time");
-        let then = SystemTime::from(SystemTime::UNIX_EPOCH)
+        let then = SystemTime::UNIX_EPOCH
             .checked_add(Duration::from_millis(ems))
             .expect("system time add");
         SystemTime::now()
@@ -220,7 +220,7 @@ fn bu(s: &str) -> String {
 }
 
 fn bbu() -> String {
-    format!("https://www.googleapis.com/batch/gmail/v1")
+    "https://www.googleapis.com/batch/gmail/v1".to_string()
 }
 
 impl<'a> GMail<'a> {
@@ -231,7 +231,7 @@ impl<'a> GMail<'a> {
         GMail {
             log,
             client: cb.build().expect("build client"),
-            auth: auth,
+            auth,
         }
     }
 
@@ -476,7 +476,7 @@ impl<'a> GMail<'a> {
                 } else if status == 429 {
                     out.push(MultiResult::RateLimit(id.to_string()));
                     continue;
-                } if status != 200 {
+                } else if status != 200 {
                     if status == 403 {
                         match serde_json::from_slice::<E>(&p.body[c..]) {
                             Ok(e) => {
@@ -649,8 +649,8 @@ impl<'a> GMail<'a> {
 
         match o.get("labels") {
             None => {
-                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,
-                    format!("missing \"labels\" in response")).into());
+                Err(std::io::Error::new(std::io::ErrorKind::InvalidData,
+                    "missing \"labels\" in response").into())
             }
             Some(l) => {
                 Ok(serde_json::from_value(l.to_owned())?)
