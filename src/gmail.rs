@@ -447,7 +447,7 @@ impl<'a> GMail<'a> {
                 }
 
                 #[allow(dead_code)]
-                #[derive(Deserialize)]
+                #[derive(Deserialize,Debug)]
                 struct EEE {
                     domain: String,
                     reason: String,
@@ -455,7 +455,7 @@ impl<'a> GMail<'a> {
                 }
 
                 #[allow(dead_code)]
-                #[derive(Deserialize)]
+                #[derive(Deserialize,Debug)]
                 struct EE {
                     errors: Vec<EEE>,
                     code: u32,
@@ -498,6 +498,9 @@ impl<'a> GMail<'a> {
                                 if ok {
                                     continue;
                                 }
+
+                                return Err(format!("{} error for {}: {:?}",
+                                    status, id, e.error).into());
                             }
                             Err(e) => {
                                 let b = String::from_utf8_lossy(&p.body[c..]);
