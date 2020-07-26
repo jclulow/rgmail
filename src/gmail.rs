@@ -42,6 +42,20 @@ pub struct Label {
     typ: String,
 }
 
+impl Label {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn type_(&self) -> &str {
+        &self.typ
+    }
+}
+
 pub trait LabelsHelper {
     fn names(&self) -> Vec<&str>;
     fn id_of(&self, n: &str) -> Option<&str>;
