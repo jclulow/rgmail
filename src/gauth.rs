@@ -19,10 +19,10 @@ use anyhow::{Result, bail, anyhow};
 #[derive(Deserialize)]
 struct RExchange {
     access_token: String,
+    expires_in: u64,
     refresh_token: String,
     scope: String,
     token_type: String,
-    expiry_date: u64,
 }
 
 #[allow(dead_code)]
@@ -113,19 +113,15 @@ impl GAuth {
         }
         params.insert("scope", &scope);
 
-        let res = self.ga_client.get(self.ga_auth_uri.as_ref())
+        /*
+         * We are only building a request here, not sending it to the server.
+         * The URL we construct will be given to the user, and they will make a
+         * request with their browser to authorise us.
+         */
+        let req = self.ga_client.get(self.ga_auth_uri.as_ref())
             .query(&params)
-            .send()?;
-
-        if res.status() != StatusCode::FOUND {
-            bail!("oddball response: {:#?}", res);
-        }
-
-        if let Some(l) = res.headers().get(header::LOCATION) {
-            Ok(String::from(l.to_str().unwrap()))
-        } else {
-            bail!("oddball response (no location): {:#?}", res);
-        }
+            .build()?;
+        Ok(req.url().to_string())
     }
 
     pub fn exchange(&self, code: &str) -> Result<()> {
@@ -145,10 +141,13 @@ impl GAuth {
         }
         debug!(self.ga_log, "exchange response: {:#?}", &res);
 
-        let o: RExchange = res.json()?;
+        let oj: serde_json::Value = res.json()?;
+        debug!(self.ga_log, "exchange body: {:#?}", &oj);
 
-        let et = SystemTime::UNIX_EPOCH
-            .checked_add(Duration::from_millis(o.expiry_date - 600_000))
+        let o: RExchange = serde_json::from_value(oj)?;
+
+        let et = SystemTime::now()
+            .checked_add(Duration::from_secs(o.expires_in * 2 / 3))
             .ok_or_else(|| anyhow!("invalid expiry time"))?;
 
         let mut i = self.ga_inner.borrow_mut();
