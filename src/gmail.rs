@@ -494,7 +494,8 @@ impl<'a> GMail<'a> {
                                 let mut ok = false;
                                 for ee in &e.error.errors {
                                     if ee.domain == "usageLimits" &&
-                                        ee.reason == "userRateLimitExceeded"
+                                        (ee.reason == "userRateLimitExceeded" ||
+                                        ee.reason == "rateLimitExceeded")
                                     {
                                         out.push(MultiResult::RateLimit(
                                             id.to_string()));
