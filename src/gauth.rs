@@ -107,9 +107,9 @@ impl GAuth {
 
         let mut scope = String::from("profile");
         if readonly {
-            scope.push_str("https://www.googleapis.com/auth/gmail.readonly");
+            scope.push_str(" https://www.googleapis.com/auth/gmail.readonly");
         } else {
-            scope.push_str("https://www.googleapis.com/auth/gmail.modify");
+            scope.push_str(" https://www.googleapis.com/auth/gmail.modify");
         }
         params.insert("scope", &scope);
 
