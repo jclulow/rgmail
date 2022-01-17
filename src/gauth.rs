@@ -1,19 +1,18 @@
 /* vim: set tw=80: */
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
-use std::cell::RefCell;
 
-use reqwest::blocking::{Client, ClientBuilder};
-use reqwest::StatusCode;
-use reqwest::header;
 use reqwest::redirect;
+use reqwest::StatusCode;
+use reqwest::{Client, ClientBuilder};
 
 use serde::Deserialize;
 
 use slog::{debug, Logger};
 
-use anyhow::{Result, bail, anyhow};
+use anyhow::{anyhow, bail, Result};
 
 #[allow(dead_code)]
 #[derive(Deserialize)]
@@ -34,13 +33,14 @@ struct RRefresh {
     expires_in: u64,
 }
 
+#[derive(Clone)]
 struct GAuthInner {
     refresh_token: String,
     access_token: String,
     expiry: Option<SystemTime>,
 }
 
-#[derive(Debug,Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct ConfigInstalled {
     client_id: String,
     client_secret: String,
@@ -48,60 +48,65 @@ pub struct ConfigInstalled {
     token_uri: String,
 }
 
-#[derive(Debug,Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct Config {
     installed: ConfigInstalled,
 }
 
+#[derive(Clone)]
 pub struct GAuth {
-    ga_log: Logger,
+    log: Logger,
 
-    ga_client_id: String,
-    ga_client_secret: String,
-    ga_auth_uri: reqwest::Url,
-    ga_token_uri: reqwest::Url,
+    client_id: String,
+    client_secret: String,
+    auth_uri: reqwest::Url,
+    token_uri: reqwest::Url,
 
-    ga_client: Client,
-    ga_inner: RefCell<GAuthInner>,
+    client: Client,
+    inner: Arc<Mutex<GAuthInner>>,
 }
 
 impl GAuth {
     pub fn new(log: Logger, config: Config) -> Result<GAuth> {
-        let cb = ClientBuilder::new()
-            .redirect(redirect::Policy::none());
+        let cb = ClientBuilder::new().redirect(redirect::Policy::none());
 
         Ok(GAuth {
-            ga_log: log,
-            ga_client: cb.build().expect("build client"),
+            log,
+            client: cb.build().expect("build client"),
 
-            ga_client_id: config.installed.client_id,
-            ga_client_secret: config.installed.client_secret,
-            ga_auth_uri: reqvalurl(&config.installed.auth_uri, "auth_uri")?,
-            ga_token_uri: reqvalurl(&config.installed.token_uri, "token_uri")?,
+            client_id: config.installed.client_id,
+            client_secret: config.installed.client_secret,
+            auth_uri: reqvalurl(&config.installed.auth_uri, "auth_uri")?,
+            token_uri: reqvalurl(&config.installed.token_uri, "token_uri")?,
 
-            ga_inner: RefCell::new(GAuthInner {
+            inner: Arc::new(Mutex::new(GAuthInner {
                 refresh_token: String::from(""),
                 access_token: String::from(""),
                 expiry: None,
-            }),
+            })),
         })
     }
 
     pub fn access_token(&self) -> String {
-        self.ga_inner.borrow().access_token.to_string()
+        self.inner.lock().unwrap().access_token.to_string()
     }
 
     pub fn refresh_token(&self) -> String {
-        self.ga_inner.borrow().refresh_token.to_string()
+        self.inner.lock().unwrap().refresh_token.to_string()
     }
 
     pub fn set_refresh_token(&self, rt: &str) {
-        self.ga_inner.borrow_mut().refresh_token = String::from(rt);
+        self.inner.lock().unwrap().refresh_token = String::from(rt);
     }
 
+    /**
+     * Build a URL to give to the user, so that they can open it in their
+     * browser and get an authentication code.  That code should then be passed
+     * to exchange().
+     */
     pub fn auth_token(&self, readonly: bool) -> Result<String> {
         let mut params: HashMap<&str, &str> = HashMap::new();
-        params.insert("client_id", &self.ga_client_id);
+        params.insert("client_id", &self.client_id);
         params.insert("redirect_uri", "urn:ietf:wg:oauth:2.0:oob");
         params.insert("response_type", "code");
 
@@ -118,31 +123,40 @@ impl GAuth {
          * The URL we construct will be given to the user, and they will make a
          * request with their browser to authorise us.
          */
-        let req = self.ga_client.get(self.ga_auth_uri.as_ref())
+        let req = self
+            .client
+            .get(self.auth_uri.as_ref())
             .query(&params)
             .build()?;
         Ok(req.url().to_string())
     }
 
-    pub fn exchange(&self, code: &str) -> Result<()> {
+    /**
+     * Exchange an authentication code from the user's browser to get a
+     * permanent refresh token we can store.
+     */
+    pub async fn exchange(&self, code: &str) -> Result<()> {
         let mut params: HashMap<&str, &str> = HashMap::new();
         params.insert("code", code);
-        params.insert("client_id", &self.ga_client_id);
-        params.insert("client_secret", &self.ga_client_secret);
+        params.insert("client_id", &self.client_id);
+        params.insert("client_secret", &self.client_secret);
         params.insert("redirect_uri", "urn:ietf:wg:oauth:2.0:oob");
         params.insert("grant_type", "authorization_code");
 
-        let res = self.ga_client.post(self.ga_token_uri.as_ref())
+        let res = self
+            .client
+            .post(self.token_uri.as_ref())
             .form(&params)
-            .send()?;
+            .send()
+            .await?;
 
         if res.status() != StatusCode::OK {
             bail!("oddball response: {:#?}", res);
         }
-        debug!(self.ga_log, "exchange response: {:#?}", &res);
+        debug!(self.log, "exchange response: {:#?}", &res);
 
-        let oj: serde_json::Value = res.json()?;
-        debug!(self.ga_log, "exchange body: {:#?}", &oj);
+        let oj: serde_json::Value = res.json().await?;
+        debug!(self.log, "exchange body: {:#?}", &oj);
 
         let o: RExchange = serde_json::from_value(oj)?;
 
@@ -150,7 +164,7 @@ impl GAuth {
             .checked_add(Duration::from_secs(o.expires_in * 2 / 3))
             .ok_or_else(|| anyhow!("invalid expiry time"))?;
 
-        let mut i = self.ga_inner.borrow_mut();
+        let mut i = self.inner.lock().unwrap();
 
         i.refresh_token = o.refresh_token;
         i.access_token = o.access_token;
@@ -159,24 +173,27 @@ impl GAuth {
         Ok(())
     }
 
-    pub fn refresh(&self) -> Result<()> {
-        let mut i = self.ga_inner.borrow_mut();
+    pub async fn refresh(&self) -> Result<()> {
+        let mut i = self.inner.lock().unwrap();
 
         let mut params: HashMap<&str, &str> = HashMap::new();
-        params.insert("client_id", &self.ga_client_id);
-        params.insert("client_secret", &self.ga_client_secret);
+        params.insert("client_id", &self.client_id);
+        params.insert("client_secret", &self.client_secret);
         params.insert("refresh_token", &i.refresh_token);
         params.insert("grant_type", "refresh_token");
 
-        let res = self.ga_client.post(self.ga_token_uri.as_ref())
+        let res = self
+            .client
+            .post(self.token_uri.as_ref())
             .form(&params)
-            .send()?;
+            .send()
+            .await?;
 
         if res.status() != reqwest::StatusCode::OK {
             bail!("oddball response: {:#?}", res);
         }
 
-        let o: RRefresh = res.json()?;
+        let o: RRefresh = res.json().await?;
 
         let et = SystemTime::now()
             .checked_add(Duration::from_secs(o.expires_in * 2 / 3))
@@ -188,16 +205,16 @@ impl GAuth {
         Ok(())
     }
 
-    pub fn check_refresh(&self) -> Result<()> {
-        let et = self.ga_inner.borrow().expiry;
+    pub async fn check_refresh(&self) -> Result<()> {
+        let et = self.inner.lock().unwrap().expiry;
 
         if let Some(et) = et {
             if SystemTime::now() > et {
-                debug!(self.ga_log, "auth token expiry pending, refreshing");
-                self.refresh()?;
+                debug!(self.log, "auth token expiry pending, refreshing");
+                self.refresh().await?;
             }
         } else {
-            debug!(self.ga_log, "check_refresh: no expiry time?");
+            debug!(self.log, "check_refresh: no expiry time?");
         }
 
         Ok(())
@@ -206,7 +223,5 @@ impl GAuth {
 
 fn reqvalurl<S: AsRef<str>>(val: S, n: &str) -> Result<reqwest::Url> {
     reqwest::Url::parse(val.as_ref())
-        .map_err(|e| {
-            anyhow!("client_id.json URL \"{}\" invalid: {}", n, e)
-        })
+        .map_err(|e| anyhow!("client_id.json URL \"{}\" invalid: {}", n, e))
 }

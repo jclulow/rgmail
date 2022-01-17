@@ -1,27 +1,43 @@
 /* vim: set tw=80: */
 
-use std::collections::{VecDeque, HashSet};
+use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
-use reqwest::blocking::{Client, ClientBuilder};
+use reqwest::header;
 use reqwest::redirect;
 use reqwest::StatusCode;
-use reqwest::header;
+use reqwest::{Client, ClientBuilder};
 use serde_aux::prelude::*;
 
-use slog::{trace, debug, Logger};
+use slog::{debug, trace, Logger};
 
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 
 use super::gauth::GAuth;
 use super::multipart::multipart_parse;
+use super::types::*;
+use super::util::*;
+use super::{history, messages};
 
-pub struct GMail<'a> {
-    log: Logger,
-    auth: &'a GAuth,
-    client: Client,
+#[derive(Clone)]
+pub struct GMailInner {
+    pub(crate) log: Logger,
+    pub(crate) auth: GAuth,
+    pub(crate) client: Client,
+}
+
+#[derive(Clone)]
+pub struct GMail(pub(crate) Arc<GMailInner>);
+
+impl std::ops::Deref for GMail {
+    type Target = GMailInner;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref()
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -63,10 +79,9 @@ pub trait LabelsHelper {
 
 impl LabelsHelper for Vec<Label> {
     fn names(&self) -> Vec<&str> {
-        let mut names: Vec<&str> = self.iter().map(|l| {
-            l.name.as_str()
-        }).collect();
-        names.sort();
+        let mut names: Vec<&str> =
+            self.iter().map(|l| l.name.as_str()).collect();
+        names.sort_unstable();
         names
     }
 
@@ -111,7 +126,10 @@ pub struct MessageRaw {
 
 impl MessageRaw {
     pub fn raw(&self) -> Result<Vec<u8>> {
-        Ok(base64::decode_config(self.raw.as_bytes(), base64::URL_SAFE)?)
+        Ok(base64::decode_config(
+            self.raw.as_bytes(),
+            base64::URL_SAFE,
+        )?)
     }
 }
 
@@ -150,8 +168,10 @@ impl MessageMinimal {
 
     pub fn age_days(&self) -> f64 {
         SystemTime::now()
-            .duration_since(self.date()).expect("since")
-            .as_secs_f64() / 86_400.
+            .duration_since(self.date())
+            .expect("since")
+            .as_secs_f64()
+            / 86_400.
     }
 }
 
@@ -225,79 +245,69 @@ impl Message {
             .checked_add(Duration::from_millis(ems))
             .expect("system time add");
         SystemTime::now()
-            .duration_since(then).expect("since")
-            .as_secs_f64() / 86_400.
+            .duration_since(then)
+            .expect("since")
+            .as_secs_f64()
+            / 86_400.
     }
 }
 
-fn bu(s: &str) -> String {
-    format!("https://www.googleapis.com/gmail/v1/{}", s)
-}
+impl GMail {
+    pub fn new(log: Logger, auth: GAuth) -> GMail {
+        let cb = ClientBuilder::new().redirect(redirect::Policy::none());
 
-fn bbu() -> String {
-    "https://www.googleapis.com/batch/gmail/v1".to_string()
-}
-
-impl<'a> GMail<'a> {
-    pub fn new(log: Logger, auth: &GAuth) -> GMail {
-        let cb = ClientBuilder::new()
-            .redirect(redirect::Policy::none());
-
-        GMail {
+        GMail(Arc::new(GMailInner {
             log,
             client: cb.build().expect("build client"),
             auth,
-        }
+        }))
     }
 
-    pub fn history_list(&self, start_at: u64) -> HistoryConfig{
-        HistoryConfig {
-            parent: self,
-            label_id: None,
-            history_types: Vec::new(),
-            perpage: None,
-            start_at,
-        }
+    pub fn history_list(&self, start_at: u64) -> history::HistoryConfig {
+        history::HistoryConfig::new(self, start_at)
     }
 
-    pub fn messages_list(&self) -> MessagesConfig {
-        MessagesConfig {
-            parent: self,
-            q: None,
-            spamtrash: false,
-            label_ids: Vec::new(),
-            perpage: None,
-            resume_from_token: None,
-        }
+    pub fn messages_list(&self) -> messages::MessagesConfig {
+        messages::MessagesConfig::new(self)
     }
 
-    pub fn profile(&self) -> Result<Profile> {
+    pub async fn profile(&self) -> Result<Profile> {
         let url = bu("users/me/profile");
 
-        self.auth.check_refresh()?;
+        self.auth.check_refresh().await?;
 
-        let res = self.client.get(&url)
-            .header(header::AUTHORIZATION, format!("Bearer {}",
-                self.auth.access_token()))
-            .send()?
+        let res = self
+            .client
+            .get(&url)
+            .header(
+                header::AUTHORIZATION,
+                format!("Bearer {}", self.auth.access_token()),
+            )
+            .send()
+            .await?
             .error_for_status()?;
 
-        Ok(res.json()?)
+        Ok(res.json().await?)
     }
 
-    pub fn message_get_min(&self, id: &str) -> Result<MessageMinimal> {
+    pub async fn message_get_min(&self, id: &str) -> Result<MessageMinimal> {
         let url = bu(&format!("users/me/messages/{}", id));
 
-        self.auth.check_refresh()?;
+        self.auth.check_refresh().await?;
 
-        let res = self.client.get(&url)
-            .header(header::AUTHORIZATION, format!("Bearer {}",
-                self.auth.access_token()))
+        let res = self
+            .client
+            .get(&url)
+            .header(
+                header::AUTHORIZATION,
+                format!("Bearer {}", self.auth.access_token()),
+            )
             .query(&[("format", "minimal")])
-            .send()?
+            .send()
+            .await?
             .error_for_status()?;
 
-        let t = res.text()?;
+        let t = res.text().await?;
 
         match serde_json::from_str(&t) {
             Ok(r) => Ok(r),
@@ -305,26 +315,31 @@ impl<'a> GMail<'a> {
         }
     }
 
-    pub fn messages_get<S: AsRef<str>>(&self, ids: &[S])
-        -> Result<Vec<MultiResult<MessageMinimal>>>
-    {
-        self.messages_get_common("minimal", ids)
+    pub async fn messages_get<S: AsRef<str>>(
+        &self,
+        ids: &[S],
+    ) -> Result<Vec<MultiResult<MessageMinimal>>> {
+        self.messages_get_common("minimal", ids).await
     }
 
-    pub fn messages_get_raw<S: AsRef<str>>(&self, ids: &[S])
-        -> Result<Vec<MultiResult<MessageRaw>>>
-    {
-        self.messages_get_common("raw", ids)
+    pub async fn messages_get_raw<S: AsRef<str>>(
+        &self,
+        ids: &[S],
+    ) -> Result<Vec<MultiResult<MessageRaw>>> {
+        self.messages_get_common("raw", ids).await
     }
 
-    fn messages_get_common<T, S: AsRef<str>>(&self,
-        fmt: &str, ids: &[S])
-        -> Result<Vec<MultiResult<T>>>
-        where for<'de> T: Deserialize<'de> + MessageId
+    async fn messages_get_common<T, S: AsRef<str>>(
+        &self,
+        fmt: &str,
+        ids: &[S],
+    ) -> Result<Vec<MultiResult<T>>>
+    where
+        for<'de> T: Deserialize<'de> + MessageId,
     {
         let url = bbu();
 
-        self.auth.check_refresh()?;
+        self.auth.check_refresh().await?;
 
         let mut body = String::new();
         let bound = "23121338-972e-11ea-a0c6-c3892af82e36";
@@ -338,9 +353,12 @@ impl<'a> GMail<'a> {
             body.push_str(&format!("Content-ID: req-{}\r\n", n));
             body.push_str("\r\n");
 
-            body.push_str(&format!("GET /gmail/v1/users/me/messages/{}?\
+            body.push_str(&format!(
+                "GET /gmail/v1/users/me/messages/{}?\
                     format={}\r\n",
-                id.as_ref(), fmt));
+                id.as_ref(),
+                fmt
+            ));
             body.push_str("\r\n");
 
             body.push_str("\r\n");
@@ -354,13 +372,24 @@ impl<'a> GMail<'a> {
 
         let buf = body.as_bytes().to_vec();
 
-        let res = self.client.post(&url)
-            .header(header::AUTHORIZATION, format!("Bearer {}",
-                self.auth.access_token()))
-            .header(header::CONTENT_TYPE, format!("multipart/mixed; \
-                boundary={}", bound))
+        let res = self
+            .client
+            .post(&url)
+            .header(
+                header::AUTHORIZATION,
+                format!("Bearer {}", self.auth.access_token()),
+            )
+            .header(
+                header::CONTENT_TYPE,
+                format!(
+                    "multipart/mixed; \
+                boundary={}",
+                    bound
+                ),
+            )
             .body(buf)
-            .send()?
+            .send()
+            .await?
             .error_for_status()?;
 
         let rbnd = if let Some(ct) = res.headers().get(header::CONTENT_TYPE) {
@@ -375,18 +404,17 @@ impl<'a> GMail<'a> {
         };
         trace!(self.log, "boundary: {:#?}", rbnd);
 
-        let x = res.bytes()?;
+        let x = res.bytes().await?;
 
         let mp = match multipart_parse(&x, rbnd.as_bytes()) {
             Ok(mp) => mp,
             Err(e) => {
-                let report = if x.len() < 200 {
-                    &x
-                } else {
-                    &x[..200]
-                };
-                debug!(self.log, "response: {:#?}",
-                    String::from_utf8_lossy(report));
+                let report = if x.len() < 200 { &x } else { &x[..200] };
+                debug!(
+                    self.log,
+                    "response: {:#?}",
+                    String::from_utf8_lossy(report)
+                );
                 bail!("response multipart error: (boundary {:?}) {}", rbnd, e);
             }
         };
@@ -399,8 +427,12 @@ impl<'a> GMail<'a> {
             } else {
                 &p.body[..200]
             };
-            trace!(self.log, "process part: {:#?} {:#?}", p.headers,
-                String::from_utf8_lossy(&report));
+            trace!(
+                self.log,
+                "process part: {:#?} {:#?}",
+                p.headers,
+                String::from_utf8_lossy(report)
+            );
 
             if let Some(ct) = p.headers.get("content-type") {
                 let ct: mime::Mime = ct.parse()?;
@@ -413,8 +445,8 @@ impl<'a> GMail<'a> {
             }
 
             let id: &str = if let Some(cid) = p.headers.get("content-id") {
-                if cid.starts_with("response-req-") {
-                    let n: usize = cid[13..].parse()?;
+                if let Some(n) = cid.strip_prefix("response-req-") {
+                    let n: usize = n.parse()?;
                     if n < ids.len() {
                         ids[n].as_ref()
                     } else {
@@ -443,36 +475,39 @@ impl<'a> GMail<'a> {
                         ct = Some(String::from_utf8(h.value.to_vec())?);
                     }
                     if h.name.to_ascii_lowercase() == "content-length" {
-                        cl = Some(String::from_utf8(h.value.to_vec())?
-                            .parse()?);
+                        cl =
+                            Some(String::from_utf8(h.value.to_vec())?.parse()?);
                     }
                 }
 
                 if ct.is_none() {
-                    debug!(self.log, "response: {:#?}",
-                        String::from_utf8_lossy(&report));
+                    debug!(
+                        self.log,
+                        "response: {:#?}",
+                        String::from_utf8_lossy(report)
+                    );
                     bail!("headers missing from response part response");
                 }
 
                 #[allow(dead_code)]
-                #[derive(Deserialize,Debug)]
-                struct EEE {
+                #[derive(Deserialize, Debug)]
+                struct Eee {
                     domain: String,
                     reason: String,
                     message: String,
                 }
 
                 #[allow(dead_code)]
-                #[derive(Deserialize,Debug)]
-                struct EE {
-                    errors: Vec<EEE>,
+                #[derive(Deserialize, Debug)]
+                struct Ee {
+                    errors: Vec<Eee>,
                     code: u32,
                     message: String,
                 }
 
                 #[derive(Deserialize)]
                 struct E {
-                    error: EE,
+                    error: Ee,
                 }
 
                 if status == 404 {
@@ -488,17 +523,21 @@ impl<'a> GMail<'a> {
                     if status == 403 {
                         match serde_json::from_slice::<E>(&p.body[c..]) {
                             Ok(e) => {
-                                debug!(self.log, "403 error: {}",
-                                    e.error.message);
+                                debug!(
+                                    self.log,
+                                    "403 error: {}", e.error.message
+                                );
 
                                 let mut ok = false;
                                 for ee in &e.error.errors {
-                                    if ee.domain == "usageLimits" &&
-                                        (ee.reason == "userRateLimitExceeded" ||
-                                        ee.reason == "rateLimitExceeded")
+                                    if ee.domain == "usageLimits"
+                                        && (ee.reason
+                                            == "userRateLimitExceeded"
+                                            || ee.reason == "rateLimitExceeded")
                                     {
                                         out.push(MultiResult::RateLimit(
-                                            id.to_string()));
+                                            id.to_string(),
+                                        ));
                                         ok = true;
                                         break;
                                     }
@@ -508,8 +547,12 @@ impl<'a> GMail<'a> {
                                     continue;
                                 }
 
-                                bail!("{} error for {}: {:?}",
-                                    status, id, e.error);
+                                bail!(
+                                    "{} error for {}: {:?}",
+                                    status,
+                                    id,
+                                    e.error
+                                );
                             }
                             Err(e) => {
                                 let b = String::from_utf8_lossy(&p.body[c..]);
@@ -521,27 +564,35 @@ impl<'a> GMail<'a> {
 
                     let b = String::from_utf8_lossy(&p.body[c..]);
                     debug!(self.log, "response: {}", b);
-                    bail!("inner response part had wrong status: {} for {}",
-                        status, id);
+                    bail!(
+                        "inner response part had wrong status: {} for {}",
+                        status,
+                        id
+                    );
                 }
 
                 let ct: mime::Mime = ct.unwrap().parse()?;
                 match (ct.type_(), ct.subtype()) {
                     (mime::APPLICATION, mime::JSON) => (),
-                    ct => bail!("response part response had wrong type: {:?}",
-                        ct),
+                    ct => {
+                        bail!("response part response had wrong type: {:?}", ct)
+                    }
                 };
 
                 if let Some(cl) = cl {
                     if cl != p.body.len() - c {
-                        bail!("response part body len {} not what we \
-                            expected (i.e., {})", p.body.len() - c, cl);
+                        bail!(
+                            "response part body len {} not what we \
+                            expected (i.e., {})",
+                            p.body.len() - c,
+                            cl
+                        );
                     }
                 }
 
-                out.push(MultiResult::Present(
-                    serde_json::from_slice(&p.body[c..])?));
-
+                out.push(MultiResult::Present(serde_json::from_slice(
+                    &p.body[c..],
+                )?));
             } else {
                 bail!("response part response incomplete");
             }
@@ -580,41 +631,53 @@ impl<'a> GMail<'a> {
         Ok(out)
     }
 
-    pub fn message_get(&self, id: &str) -> Result<Message> {
+    pub async fn message_get(&self, id: &str) -> Result<Message> {
         let url = bu(&format!("users/me/messages/{}", id));
 
-        self.auth.check_refresh()?;
+        self.auth.check_refresh().await?;
 
-        let res = self.client.get(&url)
-            .header(header::AUTHORIZATION, format!("Bearer {}",
-                self.auth.access_token()))
+        let res = self
+            .client
+            .get(&url)
+            .header(
+                header::AUTHORIZATION,
+                format!("Bearer {}", self.auth.access_token()),
+            )
             .query(&[("format", "metadata")])
-            .send()?
+            .send()
+            .await?
             .error_for_status()?;
 
-        Ok(res.json()?)
+        Ok(res.json().await?)
     }
 
-    pub fn message_get_raw(&self, id: &str) -> Result<Vec<u8>> {
+    pub async fn message_get_raw(&self, id: &str) -> Result<Vec<u8>> {
         let url = bu(&format!("users/me/messages/{}", id));
 
-        self.auth.check_refresh()?;
+        self.auth.check_refresh().await?;
 
-        let res = self.client.get(&url)
-            .header(header::AUTHORIZATION, format!("Bearer {}",
-                self.auth.access_token()))
+        let res = self
+            .client
+            .get(&url)
+            .header(
+                header::AUTHORIZATION,
+                format!("Bearer {}", self.auth.access_token()),
+            )
             .query(&[("format", "raw")])
-            .send()?
+            .send()
+            .await?
             .error_for_status()?;
 
-        let mr: MessageRaw = res.json()?;
+        let mr: MessageRaw = res.json().await?;
 
         Ok(base64::decode_config(mr.raw.as_bytes(), base64::URL_SAFE)?)
     }
 
-    pub fn thread_remove_label(&self, thread_id: &str, label: &str)
-        -> Result<()>
-    {
+    pub async fn thread_remove_label(
+        &self,
+        thread_id: &str,
+        label: &str,
+    ) -> Result<()> {
         let url = bu(&format!("users/me/threads/{}/modify", thread_id));
 
         #[derive(Serialize)]
@@ -623,397 +686,48 @@ impl<'a> GMail<'a> {
             remove_label_ids: Vec<&'a str>,
         }
 
-        self.auth.check_refresh()?;
+        self.auth.check_refresh().await?;
 
-        self.client.post(&url)
-            .header(header::AUTHORIZATION, format!("Bearer {}",
-                self.auth.access_token()))
-            .json(&RB { remove_label_ids: vec!(label) })
-            .send()?
+        self.client
+            .post(&url)
+            .header(
+                header::AUTHORIZATION,
+                format!("Bearer {}", self.auth.access_token()),
+            )
+            .json(&RB {
+                remove_label_ids: vec![label],
+            })
+            .send()
+            .await?
             .error_for_status()?;
 
         Ok(())
     }
 
-    pub fn labels_list(&self) -> Result<Vec<Label>> {
+    pub async fn labels_list(&self) -> Result<Vec<Label>> {
         let url = bu("users/me/labels");
 
-        self.auth.check_refresh()?;
+        self.auth.check_refresh().await?;
 
-        let res = self.client.get(&url)
-            .header(header::AUTHORIZATION, format!("Bearer {}",
-                self.auth.access_token()))
-            .send()?;
+        let res = self
+            .client
+            .get(&url)
+            .header(
+                header::AUTHORIZATION,
+                format!("Bearer {}", self.auth.access_token()),
+            )
+            .send()
+            .await?;
 
         if res.status() != StatusCode::OK {
             bail!("oddball response: {:#?}", res);
         }
 
-        let o: serde_json::Value = res.json()?;
+        let o: serde_json::Value = res.json().await?;
 
         match o.get("labels") {
             None => bail!("missing \"labels\" in response"),
             Some(l) => Ok(serde_json::from_value(l.to_owned())?),
-        }
-    }
-}
-
-pub struct MessagesConfig<'a> {
-    parent: &'a GMail<'a>,
-    perpage: Option<u32>,
-    q: Option<String>,
-    spamtrash: bool,
-    label_ids: Vec<String>,
-    resume_from_token: Option<String>,
-}
-
-impl<'a> MessagesConfig<'a> {
-    pub fn query<S: AsRef<str>>(mut self, s: S) -> MessagesConfig<'a> {
-        self.q = Some(s.as_ref().to_string());
-        self
-    }
-
-    pub fn include_spam_trash(mut self, i: bool) -> MessagesConfig<'a> {
-        self.spamtrash = i;
-        self
-    }
-
-    pub fn resume_from_token(mut self, s: &str) -> MessagesConfig<'a> {
-        self.resume_from_token = Some(s.to_string());
-        self
-    }
-
-    pub fn batch_size(mut self, n: u32) -> MessagesConfig<'a> {
-        self.perpage = Some(n);
-        self
-    }
-
-    pub fn labels_clear(mut self) -> MessagesConfig<'a> {
-        self.label_ids.clear();
-        self
-    }
-
-    pub fn label_add(mut self, label_id: &str) -> MessagesConfig<'a> {
-        let s = label_id.to_string();
-
-        if !self.label_ids.contains(&s) {
-            self.label_ids.push(s);
-        }
-
-        self
-    }
-
-    pub fn start(self) -> Messages<'a> {
-        Messages {
-            fin: false,
-            previous_token: None,
-            page_token: self.resume_from_token.clone(),
-            c: self,
-            infl: VecDeque::new(),
-        }
-    }
-}
-
-pub struct Messages<'a> {
-    fin: bool,
-    previous_token: Option<String>,
-    page_token: Option<String>,
-    c: MessagesConfig<'a>,
-    infl: VecDeque<RMessage>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RMessage {
-    id: String,
-    thread_id: String,
-}
-
-impl RMessage {
-    pub fn id(&self) -> &str {
-        self.id.as_str()
-    }
-
-    pub fn thread_id(&self) -> &str {
-        self.thread_id.as_str()
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RMessages {
-    messages: Vec<RMessage>,
-    next_page_token: Option<String>,
-    result_size_estimate: u64,
-}
-
-impl<'a> Messages<'a> {
-    pub fn resume_token(&self) -> Option<String> {
-        self.previous_token.clone()
-    }
-
-    fn fetch_page(&mut self) -> Result<RMessages> {
-        let log = &self.c.parent.log;
-
-        debug!(log, "requesting more message IDs (pt {:?})", self.page_token);
-
-        let url = bu("users/me/messages");
-
-        self.c.parent.auth.check_refresh()?;
-
-        let mut req = self.c.parent.client.get(&url)
-            .header(header::AUTHORIZATION, format!("Bearer {}",
-                self.c.parent.auth.access_token()));
-
-        if let Some(q) = &self.c.q {
-            req = req.query(&[("q", q)]);
-        }
-        if self.c.spamtrash {
-            req = req.query(&[("includeSpamTrash", "true")]);
-        }
-        for l in &self.c.label_ids {
-            req = req.query(&[("labelIds", l)]);
-        }
-        if let Some(pt) = &self.page_token {
-            req = req.query(&[("pageToken", pt)]);
-        }
-        if let Some(pp) = &self.c.perpage {
-            req = req.query(&[("maxResults", pp.to_string())]);
-        }
-
-        let req = req.build()?;
-        debug!(log, "request for page: {}", req.url());
-
-        let res = self.c.parent.client.execute(req)?.error_for_status()?;
-
-        Ok(res.json()?)
-    }
-
-    fn next_(&mut self) -> Option<Result<RMessage>> {
-        let log = &self.c.parent.log;
-
-        loop {
-            if let Some(rm) = self.infl.pop_front() {
-                return Some(Ok(rm));
-            }
-
-            if self.fin {
-                debug!(log, "finished completely!");
-                return None;
-            }
-
-            let o = match self.fetch_page() {
-                Ok(o) => o,
-                Err(e) => return Some(Err(e)),
-            };
-
-            debug!(log, "result count estimate: {}", o.result_size_estimate);
-
-            debug!(log, "new next page token: {:?}", o.next_page_token);
-            self.previous_token = self.page_token.clone();
-            self.page_token = o.next_page_token;
-            if self.page_token.is_none() {
-                /*
-                 * If we do not have a next page token, the stream is finished
-                 * once we dispatch all messages.
-                 */
-                self.fin = true;
-            }
-
-            debug!(log, "got {} messages", o.messages.len());
-            for rm in o.messages {
-                self.infl.push_back(rm);
-            }
-        }
-    }
-}
-
-impl<'a> Iterator for Messages<'a> {
-    type Item = Result<RMessage>;
-
-    fn next(&mut self) -> Option<Result<RMessage>> {
-        self.next_()
-    }
-}
-
-pub struct HistoryConfig<'a> {
-    parent: &'a GMail<'a>,
-    perpage: Option<u32>,
-    label_id: Option<String>,
-    history_types: Vec<String>,
-    start_at: u64,
-}
-
-impl<'a> HistoryConfig<'a> {
-    pub fn batch_size(mut self, n: u32) -> HistoryConfig<'a> {
-        self.perpage = Some(n);
-        self
-    }
-
-    pub fn history_types_clear(mut self) -> HistoryConfig<'a> {
-        self.history_types.clear();
-        self
-    }
-
-    pub fn history_type_add(mut self, history_type: &str)
-        -> HistoryConfig<'a>
-    {
-        let s = history_type.to_string();
-
-        if !self.history_types.contains(&s) {
-            self.history_types.push(s);
-        }
-
-        self
-    }
-
-    pub fn label(mut self, label_id: &str) -> HistoryConfig<'a> {
-        self.label_id = Some(label_id.to_string());
-        self
-    }
-
-    pub fn start(self) -> History<'a> {
-        History {
-            fin: false,
-            page_token: None,
-            c: self,
-            infl: VecDeque::new(),
-            final_id: None,
-        }
-    }
-}
-
-pub struct History<'a> {
-    fin: bool,
-    page_token: Option<String>,
-    c: HistoryConfig<'a>,
-    infl: VecDeque<RHistoryRecord>,
-    final_id: Option<u64>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RHistoryMessage {
-    pub id: String,
-    pub thread_id: String,
-    #[serde(default)]
-    pub label_ids: HashSet<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RHistoryMessageWrap {
-    pub message: RHistoryMessage,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RHistoryLabels {
-    pub label_ids: Vec<String>,
-    pub message: RHistoryMessage,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RHistoryRecord {
-    #[serde(deserialize_with = "deserialize_number_from_string")]
-    pub id: u64,
-    pub messages: Vec<RMessage>,
-    pub messages_added: Option<Vec<RHistoryMessageWrap>>,
-    pub messages_deleted: Option<Vec<RHistoryMessageWrap>>,
-    pub labels_removed: Option<Vec<RHistoryLabels>>,
-    pub labels_added: Option<Vec<RHistoryLabels>>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RHistory {
-    #[serde(default)]
-    pub history: Vec<RHistoryRecord>,
-    pub next_page_token: Option<String>,
-    #[serde(deserialize_with = "deserialize_number_from_string")]
-    pub history_id: u64,
-}
-
-impl<'a> History<'a> {
-    pub fn final_id(&self) -> u64 {
-        self.final_id.unwrap()
-    }
-
-    fn fetch_page(&mut self) -> Result<RHistory> {
-        let log = &self.c.parent.log;
-
-        debug!(log, "requesting more histories (pt {:?})", self.page_token);
-
-        let url = bu("users/me/history");
-
-        self.c.parent.auth.check_refresh()?;
-
-        let mut req = self.c.parent.client.get(&url)
-            .header(header::AUTHORIZATION, format!("Bearer {}",
-                self.c.parent.auth.access_token()));
-
-        req = req.query(&[("startHistoryId",
-            self.c.start_at.to_string())]);
-        if let Some(label_id) = &self.c.label_id {
-            req = req.query(&[("labelId", label_id)]);
-        }
-        for t in &self.c.history_types {
-            req = req.query(&[("historyTypes", t)]);
-        }
-        if let Some(pt) = &self.page_token {
-            req = req.query(&[("pageToken", pt)]);
-        }
-        if let Some(pp) = &self.c.perpage {
-            req = req.query(&[("maxResults", pp.to_string())]);
-        }
-
-        let req = req.build()?;
-        debug!(log, "request for page: {}", req.url());
-
-        let res = self.c.parent.client.execute(req)?.error_for_status()?;
-
-        Ok(res.json()?)
-    }
-}
-
-impl<'a> Iterator for &mut History<'a> {
-    type Item = Result<RHistoryRecord>;
-
-    fn next(&mut self) -> Option<Result<RHistoryRecord>> {
-        let log = &self.c.parent.log;
-
-        loop {
-            if let Some(rm) = self.infl.pop_front() {
-                return Some(Ok(rm));
-            }
-
-            if self.fin {
-                debug!(log, "finished completely!");
-                return None;
-            }
-
-            debug!(log, "requesting more histories (pt {:?})", self.page_token);
-            let o = match self.fetch_page() {
-                Ok(o) => o,
-                Err(e) => return Some(Err(e)),
-            };
-
-            debug!(log, "new next page token: {:?}", o.next_page_token);
-            self.page_token = o.next_page_token;
-            if self.page_token.is_none() {
-                /*
-                 * If we do not have a next page token, the stream is finished
-                 * once we dispatch all messages.
-                 */
-                self.fin = true;
-                self.final_id = Some(o.history_id);
-            }
-
-            debug!(log, "got {} history records", o.history.len());
-            for hr in o.history {
-                self.infl.push_back(hr);
-            }
         }
     }
 }

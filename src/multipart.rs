@@ -1,5 +1,5 @@
+use anyhow::{bail, Result};
 use std::collections::HashMap;
-use anyhow::{Result, bail};
 
 #[derive(Debug, Default)]
 pub struct Part {
@@ -15,8 +15,7 @@ pub struct Multipart {
 const DASHDASH: &[u8] = b"--";
 const CRLF: &[u8] = b"\r\n";
 
-pub fn multipart_parse(data: &[u8], boundary: &[u8]) -> Result<Multipart>
-{
+pub fn multipart_parse(data: &[u8], boundary: &[u8]) -> Result<Multipart> {
     let mut mp = Multipart::default();
     let mut parts: Vec<Vec<u8>> = Vec::new();
 
@@ -64,8 +63,13 @@ pub fn multipart_parse(data: &[u8], boundary: &[u8]) -> Result<Multipart>
     let acc: std::cell::RefCell<Vec<u8>> = std::cell::RefCell::new(Vec::new());
 
     let f = |m: &str| -> Result<Multipart> {
-        bail!("(pos {}/{} acc len {}) {}", pos.borrow(), data.len(),
-            acc.borrow().len(), m);
+        bail!(
+            "(pos {}/{} acc len {}) {}",
+            pos.borrow(),
+            data.len(),
+            acc.borrow().len(),
+            m
+        );
     };
 
     let follows = |sample: &[u8]| -> bool {
@@ -123,8 +127,12 @@ pub fn multipart_parse(data: &[u8], boundary: &[u8]) -> Result<Multipart>
                 } else if end {
                     break;
                 } else {
-                    println!("dbg: {:#?} end {} posdata {:?}", mp, end,
-                        &data[*pos.borrow()..*pos.borrow() + 2]);
+                    println!(
+                        "dbg: {:#?} end {} posdata {:?}",
+                        mp,
+                        end,
+                        &data[*pos.borrow()..*pos.borrow() + 2]
+                    );
                     return f("expected part or end");
                 }
             }
@@ -222,14 +230,10 @@ pub fn multipart_parse(data: &[u8], boundary: &[u8]) -> Result<Multipart>
 
         for hdr in &hdrs {
             let t: Vec<&str> = hdr.splitn(2, ':').collect();
-            headers.insert(t[0].to_ascii_lowercase(),
-                t[1].trim().to_string());
+            headers.insert(t[0].to_ascii_lowercase(), t[1].trim().to_string());
         }
 
-        mp.parts.push(Part {
-            headers,
-            body,
-        });
+        mp.parts.push(Part { headers, body });
     }
 
     Ok(mp)
