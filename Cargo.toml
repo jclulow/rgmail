@@ -2,6 +2,9 @@
 name = "rgmail"
 version = "0.2.0"
 edition = "2021"
+license = "MPL-2.0"
+description = "Gmail API Client"
+repository = "https://github.com/jclulow/rgmail"
 
 [dependencies]
 reqwest = { version = "0.11", features =  [ "json" ] }

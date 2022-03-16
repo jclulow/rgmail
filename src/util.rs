@@ -1,3 +1,7 @@
+/*
+ * Copyright 2022 Joshua M. Clulow <josh@sysmgr.org>
+ */
+
 pub fn bu(s: &str) -> String {
     format!("https://www.googleapis.com/gmail/v1/{}", s)
 }

@@ -1,3 +1,7 @@
+/*
+ * Copyright 2022 Joshua M. Clulow <josh@sysmgr.org>
+ */
+
 use anyhow::{bail, Result};
 use std::collections::HashMap;
 

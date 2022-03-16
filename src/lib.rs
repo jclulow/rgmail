@@ -1,3 +1,7 @@
+/*
+ * Copyright 2022 Joshua M. Clulow <josh@sysmgr.org>
+ */
+
 #![allow(unused_imports)] /* XXX */
 
 pub mod gauth;

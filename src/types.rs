@@ -1,3 +1,7 @@
+/*
+ * Copyright 2022 Joshua M. Clulow <josh@sysmgr.org>
+ */
+
 use std::collections::HashSet;
 
 use serde::Deserialize;
