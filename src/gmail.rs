@@ -101,6 +101,29 @@ impl LabelsHelper for Vec<Label> {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct MessageSend {
+    raw: String,
+}
+
+impl MessageSend {
+    fn new(data: &[u8]) -> Result<MessageSend> {
+        Ok(MessageSend {
+            raw: base64::encode_config(data, base64::URL_SAFE),
+        })
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageSent {
+    pub id: String,
+    pub thread_id: String,
+    #[serde(default)]
+    pub label_ids: HashSet<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MessageHeader {
     pub name: String,
     pub value: String,
@@ -677,6 +700,28 @@ impl GMail {
         let mr: MessageRaw = res.json().await?;
 
         Ok(base64::decode_config(mr.raw.as_bytes(), base64::URL_SAFE)?)
+    }
+
+    pub async fn message_send(&self, raw: &[u8]) -> Result<MessageSent> {
+        let url = bu("users/me/messages/send");
+
+        self.auth.check_refresh().await?;
+
+        let ms = MessageSend::new(raw)?;
+
+        let res = self
+            .client
+            .post(&url)
+            .header(
+                header::AUTHORIZATION,
+                format!("Bearer {}", self.auth.access_token()),
+            )
+            .json(&ms)
+            .send()
+            .await?
+            .error_for_status()?;
+
+        Ok(res.json().await?)
     }
 
     pub async fn thread_remove_label(
