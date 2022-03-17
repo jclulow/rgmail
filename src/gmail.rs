@@ -1,5 +1,6 @@
 /*
  * Copyright 2022 Joshua M. Clulow <josh@sysmgr.org>
+ * Copyright 2022 Oxide Computer Company
  */
 
 use std::collections::HashSet;
@@ -256,7 +257,10 @@ impl Message {
 
 impl GMail {
     pub fn new(log: Logger, auth: GAuth) -> GMail {
-        let cb = ClientBuilder::new().redirect(redirect::Policy::none());
+        let cb = ClientBuilder::new()
+            .tcp_keepalive(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(30))
+            .redirect(redirect::Policy::none());
 
         GMail(Arc::new(GMailInner {
             log,

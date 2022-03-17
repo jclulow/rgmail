@@ -1,5 +1,6 @@
 /*
  * Copyright 2022 Joshua M. Clulow <josh@sysmgr.org>
+ * Copyright 2022 Oxide Computer Company
  */
 
 use std::collections::HashMap;
@@ -70,7 +71,10 @@ pub struct GAuth {
 
 impl GAuth {
     pub fn new(log: Logger, config: Config) -> Result<GAuth> {
-        let cb = ClientBuilder::new().redirect(redirect::Policy::none());
+        let cb = ClientBuilder::new()
+            .tcp_keepalive(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(30))
+            .redirect(redirect::Policy::none());
 
         Ok(GAuth {
             log,
@@ -176,12 +180,12 @@ impl GAuth {
     }
 
     pub async fn refresh(&self) -> Result<()> {
-        let mut i = self.inner.lock().unwrap();
+        let refresh_token = self.inner.lock().unwrap().refresh_token.clone();
 
         let mut params: HashMap<&str, &str> = HashMap::new();
         params.insert("client_id", &self.client_id);
         params.insert("client_secret", &self.client_secret);
-        params.insert("refresh_token", &i.refresh_token);
+        params.insert("refresh_token", &refresh_token);
         params.insert("grant_type", "refresh_token");
 
         let res = self
@@ -201,6 +205,8 @@ impl GAuth {
             .checked_add(Duration::from_secs(o.expires_in * 2 / 3))
             .ok_or_else(|| anyhow!("invalid expiry time"))?;
 
+        let mut i = self.inner.lock().unwrap();
+
         i.access_token = o.access_token;
         i.expiry = Some(et);
 
@@ -210,13 +216,23 @@ impl GAuth {
     pub async fn check_refresh(&self) -> Result<()> {
         let et = self.inner.lock().unwrap().expiry;
 
-        if let Some(et) = et {
+        let refresh = if self.inner.lock().unwrap().access_token == "" {
+            debug!(self.log, "no auth token yet, refreshing");
+            true
+        } else if let Some(et) = et {
             if SystemTime::now() > et {
                 debug!(self.log, "auth token expiry pending, refreshing");
-                self.refresh().await?;
+                true
+            } else {
+                false
             }
         } else {
             debug!(self.log, "check_refresh: no expiry time?");
+            false
+        };
+
+        if refresh {
+            self.refresh().await?;
         }
 
         Ok(())
