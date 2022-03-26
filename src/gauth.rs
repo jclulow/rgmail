@@ -64,6 +64,7 @@ pub struct GAuth {
     client_secret: String,
     auth_uri: reqwest::Url,
     token_uri: reqwest::Url,
+    redirect_uri: String,
 
     client: Client,
     inner: Arc<Mutex<GAuthInner>>,
@@ -71,6 +72,20 @@ pub struct GAuth {
 
 impl GAuth {
     pub fn new(log: Logger, config: Config) -> Result<GAuth> {
+        /*
+         * Even though, in its continuing war on users, Google have recklessly
+         * deprecated the OOB redirect URI, we should not change the default
+         * behaviour without a major roll -- especially when it is not clear
+         * what the replacement would even be.
+         */
+        Self::new_with_redirect_uri(log, config, "urn:ietf:wg:oauth:2.0:oob")
+    }
+
+    pub fn new_with_redirect_uri(
+        log: Logger,
+        config: Config,
+        redirect_uri: &str,
+    ) -> Result<GAuth> {
         let cb = ClientBuilder::new()
             .tcp_keepalive(Duration::from_secs(30))
             .connect_timeout(Duration::from_secs(30))
@@ -84,6 +99,7 @@ impl GAuth {
             client_secret: config.installed.client_secret,
             auth_uri: reqvalurl(&config.installed.auth_uri, "auth_uri")?,
             token_uri: reqvalurl(&config.installed.token_uri, "token_uri")?,
+            redirect_uri: redirect_uri.to_string(),
 
             inner: Arc::new(Mutex::new(GAuthInner {
                 refresh_token: String::from(""),
@@ -113,7 +129,7 @@ impl GAuth {
     pub fn auth_token(&self, readonly: bool) -> Result<String> {
         let mut params: HashMap<&str, &str> = HashMap::new();
         params.insert("client_id", &self.client_id);
-        params.insert("redirect_uri", "urn:ietf:wg:oauth:2.0:oob");
+        params.insert("redirect_uri", &self.redirect_uri);
         params.insert("response_type", "code");
 
         let mut scope = String::from("profile");
@@ -146,7 +162,7 @@ impl GAuth {
         params.insert("code", code);
         params.insert("client_id", &self.client_id);
         params.insert("client_secret", &self.client_secret);
-        params.insert("redirect_uri", "urn:ietf:wg:oauth:2.0:oob");
+        params.insert("redirect_uri", &self.redirect_uri);
         params.insert("grant_type", "authorization_code");
 
         let res = self
